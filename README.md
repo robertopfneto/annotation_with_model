@@ -14,6 +14,8 @@ Ferramenta interativa para validar detecoes das classes listadas em `TARGET_CLAS
 > Observacao: `tkinter` ja acompanha a instalacao oficial do Python em Windows e macOS. No Linux pode ser necessario instalar `python3-tk` via gerenciador de pacotes.
 
 ## Estrutura esperada
+
+
 ```
 tracker/
 ├── best.pt
@@ -27,6 +29,22 @@ tracker/
         │   └── ... frames_validados.jpg
         └── annotations.coco.json
 ```
+- Não precisa ser exatamente como está acima, no lugar do video.mp4 pode ser uma pasta dataset com as imagens dentro
+
+```
+tracker/
+├── best.pt
+├── dataset/
+│   └── ... images[i].jpg
+└── testa_tracking/
+    ├── main.py
+    ├── README.md
+    └── output_dataset/
+        ├── images/
+        │   └── ... images[i].jpg
+        └── annotations.coco.json
+```
+
 
 ## Configuracao de classes
 - Abra `main.py` e ajuste a lista `TARGET_CLASSES` com os rótulos exatos disponibilizados em `model.pt`. É possível validar quantas classes forem necessárias; cada item da lista gera automaticamente uma entrada em `categories`.
