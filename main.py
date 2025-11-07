@@ -4,7 +4,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -12,17 +12,27 @@ import tkinter as tk
 from PIL import Image, ImageTk
 from ultralytics import YOLO
 
-# ====== CONFIGURACOES ======
+RESAMPLE_LANCZOS = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+
+# Setup de caminhos e parametros
 SOURCE_PATH = Path(
-    ""
+    "dataset"
 )
+# Configuracoes de deteccao e classes alvo
+CONF_THRESHOLD = 0.60
+TARGET_CLASSES = ["swimming_pool"]
+DEFAULT_MANUAL_CLASS = TARGET_CLASSES[0] if TARGET_CLASSES else None
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "best.pt"
+DEFAULT_WEIGHTS_PATH = Path(__file__).resolve().parent / "model.pt"
+LEGACY_WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "best.pt"
+WEIGHTS_PATH = DEFAULT_WEIGHTS_PATH if DEFAULT_WEIGHTS_PATH.exists() else LEGACY_WEIGHTS_PATH
 OUTPUT_DIR = Path(__file__).resolve().parent / "output_dataset"
 OUTPUT_IMAGES_DIR = OUTPUT_DIR / "images"
 ANNOTATIONS_PATH = OUTPUT_DIR / "annotations.coco.json"
-CONF_THRESHOLD = 0.60
-TARGET_CLASS = "car"
+
+
+
 
 
 @dataclass
@@ -30,6 +40,7 @@ class Detection:
     bbox_xyxy: np.ndarray
     confidence: float
     category_id: int
+    label: str
 
 
 class AnnotationTool:
@@ -39,7 +50,10 @@ class AnnotationTool:
         if not SOURCE_PATH.exists():
             raise FileNotFoundError(f"Origem nao encontrada: {SOURCE_PATH}")
         if not WEIGHTS_PATH.exists():
-            raise FileNotFoundError(f"Pesos nao encontrados: {WEIGHTS_PATH}")
+            raise FileNotFoundError(
+                "Pesos nao encontrados. Coloque o arquivo em "
+                f"{DEFAULT_WEIGHTS_PATH} ou mantenha o nome antigo em {LEGACY_WEIGHTS_PATH}"
+            )
 
         OUTPUT_DIR.mkdir(exist_ok=True)
         OUTPUT_IMAGES_DIR.mkdir(exist_ok=True)
@@ -66,26 +80,44 @@ class AnnotationTool:
         self.remove_mode = False
         self.manual_boxes: List[Tuple[int, int, int, int]] = []
         self.drawing_start: Optional[Tuple[int, int]] = None
+        self.drawing_start_display: Optional[Tuple[int, int]] = None
         self.drawing_rect_id: Optional[int] = None
         self.canvas_image_id: Optional[int] = None
+        self.display_scale = 1.0
+
+        if not TARGET_CLASSES:
+            raise ValueError("TARGET_CLASSES deve conter ao menos uma classe.")
+
+        self.categories = [
+            {"id": idx + 1, "name": class_name} for idx, class_name in enumerate(TARGET_CLASSES)
+        ]
+        self.class_to_category_id: Dict[str, int] = {
+            item["name"]: item["id"] for item in self.categories
+        }
+
+        if DEFAULT_MANUAL_CLASS not in self.class_to_category_id:
+            raise ValueError("DEFAULT_MANUAL_CLASS precisa existir em TARGET_CLASSES.")
+        self.manual_category_id = self.class_to_category_id[DEFAULT_MANUAL_CLASS]
 
         self.images = []
         self.annotations = []
-        self.categories = [{"id": 1, "name": TARGET_CLASS}]
 
         self.window = tk.Tk()
         self.window.title("Validador de deteccoes")
         self.window.protocol("WM_DELETE_WINDOW", self.on_quit)
 
+        controls_frame = tk.Frame(self.window)
+        controls_frame.pack(side=tk.TOP, fill=tk.X, pady=10)
+
         self.info_var = tk.StringVar(value="Carregando...")
-        self.info_label = tk.Label(self.window, textvariable=self.info_var, font=("Arial", 12))
-        self.info_label.pack(pady=10)
+        self.info_label = tk.Label(controls_frame, textvariable=self.info_var, font=("Arial", 12))
+        self.info_label.pack(side=tk.TOP, pady=(0, 10))
+
+        buttons_frame = tk.Frame(controls_frame)
+        buttons_frame.pack(side=tk.TOP, fill=tk.X)
 
         self.canvas = tk.Canvas(self.window, bg="black", highlightthickness=0)
-        self.canvas.pack()
-
-        buttons_frame = tk.Frame(self.window)
-        buttons_frame.pack(pady=10)
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.accept_button = tk.Button(buttons_frame, text="Validar (Enter)", command=self.on_accept, width=18)
         self.accept_button.grid(row=0, column=0, padx=5)
@@ -180,6 +212,7 @@ class AnnotationTool:
         self.annotation_mode = True
         self.remove_mode = False
         self.drawing_start = None
+        self.drawing_start_display = None
         if self.drawing_rect_id is not None:
             self.canvas.delete(self.drawing_rect_id)
             self.drawing_rect_id = None
@@ -198,16 +231,26 @@ class AnnotationTool:
         result = results[0]
         names = result.names
 
+        def resolve_label(cls_idx: int) -> str:
+            if isinstance(names, dict):
+                return names.get(cls_idx, str(cls_idx))
+            if isinstance(names, (list, tuple)) and 0 <= cls_idx < len(names):
+                return names[cls_idx]
+            return str(cls_idx)
+
         for box in result.boxes:
             conf = float(box.conf)
             cls_id = int(box.cls)
-            label = names.get(cls_id, str(cls_id))
-            if conf < CONF_THRESHOLD or label != TARGET_CLASS:
+            label = resolve_label(cls_id)
+            if conf < CONF_THRESHOLD or label not in self.class_to_category_id:
                 continue
+            category_id = self.class_to_category_id[label]
             xyxy = box.xyxy.cpu().numpy()[0]
             xyxy[0::2] = np.clip(xyxy[0::2], 0, width - 1)
             xyxy[1::2] = np.clip(xyxy[1::2], 0, height - 1)
-            detections.append(Detection(bbox_xyxy=xyxy, confidence=conf, category_id=1))
+            detections.append(
+                Detection(bbox_xyxy=xyxy, confidence=conf, category_id=category_id, label=label)
+            )
 
         return detections
 
@@ -216,7 +259,7 @@ class AnnotationTool:
         for det in detections:
             x1, y1, x2, y2 = det.bbox_xyxy.astype(int)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{TARGET_CLASS} {det.confidence * 100:.1f}%"
+            label = f"{det.label} {det.confidence * 100:.1f}%"
             cv2.putText(frame, label, (x1, max(y1 - 10, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         return frame
 
@@ -227,19 +270,50 @@ class AnnotationTool:
 
         annotated = self.draw_detections(self.current_frame.copy(), self.current_detections)
         height, width = annotated.shape[:2]
+        self.last_frame_shape = (width, height)
         rgb_frame = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(rgb_frame)
-        self.tk_image = ImageTk.PhotoImage(image=pil_image)
+
+        self.window.update_idletasks()
+        screen_width = self.window.winfo_screenwidth()
+        screen_height = self.window.winfo_screenheight()
+        max_width = max(1, int(screen_width * 0.9))
+        max_height = max(1, int(screen_height * 0.9))
+
+        scale = min(1.0, max_width / width, max_height / height)
+        if scale < 1.0:
+            display_width = max(1, int(width * scale))
+            display_height = max(1, int(height * scale))
+            display_image = pil_image.resize((display_width, display_height), resample=RESAMPLE_LANCZOS)
+        else:
+            display_width, display_height = width, height
+            display_image = pil_image
+
+        self.display_scale = scale
+        self.tk_image = ImageTk.PhotoImage(image=display_image)
 
         self.canvas.delete("all")
-        self.canvas.config(width=width, height=height)
+        self.canvas.config(width=display_width, height=display_height)
         self.canvas_image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
 
         for (x1, y1, x2, y2) in self.manual_boxes:
-            self.canvas.create_rectangle(x1, y1, x2, y2, outline="yellow", width=2)
+            dx1, dy1 = self.to_display_coords(x1, y1)
+            dx2, dy2 = self.to_display_coords(x2, y2)
+            self.canvas.create_rectangle(dx1, dy1, dx2, dy2, outline="yellow", width=2)
 
-        self.last_frame_shape = (width, height)
         self.update_status()
+
+    def to_original_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Converte coordenadas do canvas para o tamanho original do frame."""
+        if self.display_scale <= 0:
+            return int(round(x)), int(round(y))
+        inv_scale = 1.0 / self.display_scale
+        return int(round(x * inv_scale)), int(round(y * inv_scale))
+
+    def to_display_coords(self, x: float, y: float) -> Tuple[int, int]:
+        """Converte coordenadas do frame original para o canvas exibido."""
+        scale = self.display_scale
+        return int(round(x * scale)), int(round(y * scale))
 
     def build_status_message(self) -> str:
         """Gera mensagem de status para a barra de informacoes."""
@@ -290,6 +364,7 @@ class AnnotationTool:
                 self.canvas.delete(self.drawing_rect_id)
                 self.drawing_rect_id = None
             self.drawing_start = None
+            self.drawing_start_display = None
         estado_msg = "ativado" if self.annotation_mode else "desativado"
         print(f"[INFO] Modo anotacao manual {estado_msg}. Clique e arraste para desenhar caixas.")
         self.update_status()
@@ -307,9 +382,12 @@ class AnnotationTool:
                 self.canvas.delete(self.drawing_rect_id)
                 self.drawing_rect_id = None
             self.drawing_start = None
+            self.drawing_start_display = None
         else:
             if not self.annotation_mode:
                 self.annotation_mode = True
+            self.drawing_start = None
+            self.drawing_start_display = None
         estado_msg = "ativado" if self.remove_mode else "desativado"
         print(f"[INFO] Modo remover anotacao {estado_msg}. Clique sobre uma caixa para remove-la.")
         self.update_status()
@@ -326,7 +404,8 @@ class AnnotationTool:
         if not self.annotation_mode:
             return
 
-        self.drawing_start = (event.x, event.y)
+        self.drawing_start = self.to_original_coords(event.x, event.y)
+        self.drawing_start_display = (event.x, event.y)
         self.drawing_rect_id = self.canvas.create_rectangle(
             event.x,
             event.y,
@@ -342,10 +421,14 @@ class AnnotationTool:
         if self.remove_mode or not self.annotation_mode or self.drawing_start is None:
             return
 
+        if self.drawing_start_display is None:
+            self.drawing_start_display = (event.x, event.y)
+        start_dx, start_dy = self.drawing_start_display
+
         if self.drawing_rect_id is None:
             self.drawing_rect_id = self.canvas.create_rectangle(
-                self.drawing_start[0],
-                self.drawing_start[1],
+                start_dx,
+                start_dy,
                 event.x,
                 event.y,
                 outline="yellow",
@@ -354,8 +437,8 @@ class AnnotationTool:
             )
         self.canvas.coords(
             self.drawing_rect_id,
-            self.drawing_start[0],
-            self.drawing_start[1],
+            start_dx,
+            start_dy,
             event.x,
             event.y,
         )
@@ -366,13 +449,14 @@ class AnnotationTool:
             return
 
         start_x, start_y = self.drawing_start
-        end_x, end_y = event.x, event.y
+        end_x, end_y = self.to_original_coords(event.x, event.y)
 
         if self.drawing_rect_id is not None:
             self.canvas.delete(self.drawing_rect_id)
             self.drawing_rect_id = None
 
         self.drawing_start = None
+        self.drawing_start_display = None
 
         if self.last_frame_shape is None:
             return
@@ -389,10 +473,11 @@ class AnnotationTool:
 
     def remove_annotation_at(self, x: int, y: int) -> bool:
         """Remove caixa que contenha o ponto (x, y) se existir."""
+        orig_x, orig_y = self.to_original_coords(x, y)
         # Prioriza caixas manuais mais recentes
         for idx in range(len(self.manual_boxes) - 1, -1, -1):
             x1, y1, x2, y2 = self.manual_boxes[idx]
-            if x1 <= x <= x2 and y1 <= y <= y2:
+            if x1 <= orig_x <= x2 and y1 <= orig_y <= y2:
                 del self.manual_boxes[idx]
                 print("[INFO] Caixa manual removida.")
                 self.update_display()
@@ -402,7 +487,7 @@ class AnnotationTool:
         for idx in range(len(self.current_detections) - 1, -1, -1):
             det = self.current_detections[idx]
             x1, y1, x2, y2 = det.bbox_xyxy.astype(int)
-            if x1 <= x <= x2 and y1 <= y <= y2:
+            if x1 <= orig_x <= x2 and y1 <= orig_y <= y2:
                 del self.current_detections[idx]
                 print("[INFO] Deteccao removida.")
                 self.update_display()
@@ -418,7 +503,12 @@ class AnnotationTool:
         detections_to_save = list(self.current_detections)
         for box in self.manual_boxes:
             detections_to_save.append(
-                Detection(bbox_xyxy=np.array(box, dtype=np.float32), confidence=1.0, category_id=1)
+                Detection(
+                    bbox_xyxy=np.array(box, dtype=np.float32),
+                    confidence=1.0,
+                    category_id=self.manual_category_id,
+                    label=DEFAULT_MANUAL_CLASS,
+                )
             )
         if detections_to_save:
             self.store_annotations(detections_to_save)
