@@ -19,7 +19,7 @@ SOURCE_PATH = Path(
     "dataset"
 )
 # Configuracoes de deteccao e classes alvo
-CONF_THRESHOLD = 0.60
+CONF_THRESHOLD = 0.40
 TARGET_CLASSES = ["swimming_pool"]
 DEFAULT_MANUAL_CLASS = TARGET_CLASSES[0] if TARGET_CLASSES else None
 
@@ -67,7 +67,7 @@ class AnnotationTool:
         self.current_source_path: Optional[Path] = None
         self.current_output_name = ""
         self.frame_index = 0
-        self.next_image_idx = 0
+        self.current_image_idx = -1
         self.image_id = 1
         self.annotation_id = 1
 
@@ -138,17 +138,29 @@ class AnnotationTool:
         )
         self.remove_button.grid(row=0, column=4, padx=5)
 
+        navigation_frame = tk.Frame(controls_frame)
+        navigation_frame.pack(side=tk.TOP, pady=(5, 0))
+
+        self.prev_button = tk.Button(navigation_frame, text="← Anterior", command=self.on_prev_image, width=12)
+        self.prev_button.pack(side=tk.LEFT, padx=5)
+
+        self.next_button = tk.Button(navigation_frame, text="Próximo →", command=self.on_next_image, width=12)
+        self.next_button.pack(side=tk.LEFT, padx=5)
+
         self.window.bind("<Return>", lambda event: self.on_accept())
         self.window.bind("<space>", lambda event: self.on_reject())
         self.window.bind("<Escape>", lambda event: self.on_quit())
         self.window.bind("k", lambda event: self.toggle_annotation_mode())
         self.window.bind("K", lambda event: self.toggle_annotation_mode())
+        self.window.bind("<Left>", lambda event: self.on_prev_image())
+        self.window.bind("<Right>", lambda event: self.on_next_image())
 
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
 
         self.media_mode, self.source_name = self._init_media()
+        self.update_navigation_buttons()
         self.load_next_frame()
 
     def _init_media(self) -> Tuple[str, str]:
@@ -174,8 +186,6 @@ class AnnotationTool:
 
     def load_next_frame(self):
         """Carrega o proximo frame ou imagem e atualiza a tela."""
-        frame = None
-
         if self.media_mode == "video":
             assert self.cap is not None
             ret, frame = self.cap.read()
@@ -185,27 +195,42 @@ class AnnotationTool:
             self.frame_index += 1
             self.current_source_path = SOURCE_PATH
             self.current_output_name = f"{self.source_name}_frame_{self.frame_index:05d}.jpg"
+            self._apply_loaded_frame(frame)
+            return
 
-        elif self.media_mode == "images":
-            while self.next_image_idx < len(self.image_paths):
-                candidate = self.image_paths[self.next_image_idx]
-                self.next_image_idx += 1
-                frame = cv2.imread(str(candidate))
-                if frame is None:
-                    print(f"[AVISO] Falha ao carregar imagem: {candidate}")
-                    continue
-                self.frame_index += 1
-                self.current_source_path = candidate
-                self.current_output_name = candidate.name
-                break
-
-            if frame is None:
-                self.finish_processing("Processamento de imagens finalizado.")
-                return
+        if self.media_mode == "images":
+            self._load_next_image_sequential()
+            return
 
         else:
             raise RuntimeError(f"Modo de midia desconhecido: {self.media_mode}")
 
+    def _load_next_image_sequential(self) -> bool:
+        """Carrega a proxima imagem disponivel seguindo a ordem da pasta."""
+        next_idx = self.current_image_idx + 1
+        while next_idx < len(self.image_paths):
+            candidate = self.image_paths[next_idx]
+            frame = cv2.imread(str(candidate))
+            if frame is None:
+                print(f"[AVISO] Falha ao carregar imagem: {candidate}")
+                next_idx += 1
+                continue
+            self._set_image_frame(next_idx, frame, candidate)
+            return True
+
+        self.finish_processing("Processamento de imagens finalizado.")
+        return False
+
+    def _set_image_frame(self, image_idx: int, frame, source_path: Path):
+        """Atualiza estado interno para a imagem indicada."""
+        self.current_image_idx = image_idx
+        self.frame_index = image_idx + 1
+        self.current_source_path = source_path
+        self.current_output_name = source_path.name
+        self._apply_loaded_frame(frame)
+
+    def _apply_loaded_frame(self, frame):
+        """Aplica rotinas comuns apos carregar um frame/imagem."""
         self.current_frame = frame
         self.current_detections = self.run_model(frame)
         self.manual_boxes = []
@@ -218,7 +243,23 @@ class AnnotationTool:
             self.drawing_rect_id = None
         self.update_annotation_button()
         self.update_remove_button()
+        self.update_navigation_buttons()
         self.update_display()
+
+    def load_image_by_index(self, target_idx: int) -> bool:
+        """Carrega uma imagem especifica usando o indice absoluto."""
+        if self.media_mode != "images":
+            return False
+        if target_idx < 0 or target_idx >= len(self.image_paths):
+            print("[INFO] Nao ha imagem nesse indice para exibir.")
+            return False
+        candidate = self.image_paths[target_idx]
+        frame = cv2.imread(str(candidate))
+        if frame is None:
+            print(f"[AVISO] Falha ao carregar imagem: {candidate}")
+            return False
+        self._set_image_frame(target_idx, frame, candidate)
+        return True
 
     def run_model(self, frame) -> List[Detection]:
         """Executa o modelo YOLO e filtra detecoes da classe alvo."""
@@ -350,6 +391,23 @@ class AnnotationTool:
             estado = "ON" if self.remove_mode else "OFF"
             self.remove_button.config(text=f"Remover anotacao {estado}")
 
+    def update_navigation_buttons(self):
+        """Ativa/desativa botoes de navegacao conforme o contexto."""
+        if not hasattr(self, "prev_button") or not hasattr(self, "next_button"):
+            return
+        if self.media_mode != "images" or not self.image_paths:
+            self.prev_button.config(state=tk.DISABLED)
+            self.next_button.config(state=tk.DISABLED)
+            return
+        if self.current_image_idx <= 0:
+            self.prev_button.config(state=tk.DISABLED)
+        else:
+            self.prev_button.config(state=tk.NORMAL)
+        if self.current_image_idx >= len(self.image_paths) - 1:
+            self.next_button.config(state=tk.DISABLED)
+        else:
+            self.next_button.config(state=tk.NORMAL)
+
     def toggle_annotation_mode(self):
         """Alterna o modo de anotacao manual ativado pelo atalho 'k'."""
         if self.current_frame is None:
@@ -391,6 +449,27 @@ class AnnotationTool:
         estado_msg = "ativado" if self.remove_mode else "desativado"
         print(f"[INFO] Modo remover anotacao {estado_msg}. Clique sobre uma caixa para remove-la.")
         self.update_status()
+
+    def on_prev_image(self):
+        """Navega para a imagem anterior quando em modo de imagens."""
+        if self.media_mode != "images":
+            return
+        if self.current_image_idx <= 0:
+            print("[INFO] Ja esta na primeira imagem.")
+            return
+        self.load_image_by_index(self.current_image_idx - 1)
+
+    def on_next_image(self):
+        """Navega para a proxima imagem quando em modo de imagens."""
+        if self.media_mode != "images":
+            return
+        if not self.image_paths:
+            return
+        target_idx = self.current_image_idx + 1 if self.current_image_idx >= 0 else 0
+        if target_idx >= len(self.image_paths):
+            print("[INFO] Ja esta na ultima imagem.")
+            return
+        self.load_image_by_index(target_idx)
 
     def on_mouse_down(self, event):
         """Inicia o desenho de uma caixa manual quando em modo anotacao."""
